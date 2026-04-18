@@ -3,13 +3,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-NAMESPACE="${K8S_NAMESPACE:-processing-local}"
+NAMESPACE="${K8S_NAMESPACE:-reporting-local}"
 IMAGE_TAG="${IMAGE_TAG:-local}"
-APP_NAME="processador-diagramas-processingservice"
-DEFAULT_CONNECTION="${CONNECTIONSTRINGS__DEFAULTCONNECTION:-Host=postgresql.default.svc.cluster.local;Port=5432;Database=processador_diagramas_processing;Username=postgres;Password=postgres}"
-AWS_REGION="${AWS_REGION:-us-east-1}"
-AWS_TOPIC_ARN="${AWS__TOPICARN:-arn:aws:sns:us-east-1:000000000000:analysis-processing-events}"
-AWS_QUEUE_URL="${AWS__QUEUEURL:-http://localstack.localstack.svc.cluster.local:4566/000000000000/analysis-process-requests}"
+APP_NAME="processador-diagramas-reportingservice"
+DEFAULT_CONNECTION="${CONNECTIONSTRINGS__DEFAULTCONNECTION:-Host=postgresql.default.svc.cluster.local;Port=5432;Database=processador_diagramas_reporting;Username=postgres;Password=postgres}"
+PROCESSING_SERVICE_BASE_URL="${PROCESSING_SERVICE__BASEURL:-http://processador-diagramas-processingservice.processing-local.svc.cluster.local}"
+PROCESSING_SERVICE_TIMEOUT="${PROCESSING_SERVICE__TIMEOUTSECONDS:-30}"
 
 if ! command -v kubectl >/dev/null 2>&1; then
   echo "[ERROR] kubectl não encontrado no PATH."
@@ -19,19 +18,18 @@ fi
 echo "[INFO] Garantindo namespace $NAMESPACE..."
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
-echo "[INFO] Aplicando configmap e secret do serviço..."
+echo "[INFO] Aplicando configmap do serviço..."
 kubectl create configmap "$APP_NAME-config" \
   --from-literal=ASPNETCORE_ENVIRONMENT="Development" \
   --from-literal=ASPNETCORE_URLS="http://+:8080" \
-  --from-literal=EnableAwsServices="true" \
-  --from-literal=Service__Name="ProcessadorDiagramas.ProcessingService" \
+  --from-literal=Service__Name="ProcessadorDiagramas.ReportingService" \
+  --from-literal=ProcessingService__BaseUrl="$PROCESSING_SERVICE_BASE_URL" \
+  --from-literal=ProcessingService__TimeoutSeconds="$PROCESSING_SERVICE_TIMEOUT" \
   -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
+echo "[INFO] Aplicando secret do serviço..."
 kubectl create secret generic "$APP_NAME-secrets" \
   --from-literal=ConnectionStrings__DefaultConnection="$DEFAULT_CONNECTION" \
-  --from-literal=Aws__Region="$AWS_REGION" \
-  --from-literal=Aws__TopicArn="$AWS_TOPIC_ARN" \
-  --from-literal=Aws__QueueUrl="$AWS_QUEUE_URL" \
   -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
 echo "[INFO] Executando migration job..."
@@ -45,3 +43,8 @@ sed "s|\${IMAGE_TAG}|$IMAGE_TAG|g" "$ROOT_DIR/deploy/k8s/deployment.yaml" | kube
 kubectl rollout status "deployment/$APP_NAME" -n "$NAMESPACE" --timeout=300s
 
 echo "[SUCCESS] Deploy concluído no namespace $NAMESPACE com a imagem tag $IMAGE_TAG."
+echo ""
+echo "Para testar localmente via port-forward:"
+echo "  kubectl port-forward -n $NAMESPACE svc/$APP_NAME 5081:80"
+echo "  curl http://localhost:5081/health"
+echo "  curl http://localhost:5081/swagger"

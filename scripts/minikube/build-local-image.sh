@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MINIKUBE_PROFILE="${MINIKUBE_PROFILE:-minikube}"
 IMAGE_TAG="${IMAGE_TAG:-local}"
-IMAGE_NAME="marciocardozodev/processador-diagramas-processingservice:${IMAGE_TAG}"
+IMAGE_NAME="marciocardozodev/processador-diagramas-reportingservice:${IMAGE_TAG}"
 
 if ! command -v minikube >/dev/null 2>&1; then
   echo "[ERROR] minikube não encontrado no PATH."

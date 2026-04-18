@@ -1,3 +1,0 @@
-namespace ProcessadorDiagramas.ProcessingService.Application.Queries.GetDiagramProcessingJob;
-
-public sealed record GetDiagramProcessingJobQuery(Guid Id);

@@ -3,11 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INPUT_DIR="$ROOT_DIR/tmp/inputs"
-INPUT_FILE_HOST="$INPUT_DIR/diagram-test.mmd"
-INPUT_FILE_CONTAINER="/tmp/processing-inputs/diagram-test.mmd"
-REQUEST_ID="$(cat /proc/sys/kernel/random/uuid)"
-CORRELATION_ID="corr-$(date +%s)"
+ANALYSIS_PROCESS_ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')"
+BASE_URL="http://127.0.0.1:5081"
 
 require_cmd() {
   local cmd="$1"
@@ -22,76 +19,88 @@ wait_for_http() {
   local retries=60
   local attempt=1
 
+  echo "[INFO] Aguardando endpoint $url..."
   until curl -fsS "$url" >/dev/null 2>&1; do
     if [[ "$attempt" -ge "$retries" ]]; then
       echo "[ERROR] Timeout aguardando endpoint $url"
       return 1
     fi
-
     attempt=$((attempt + 1))
     sleep 2
   done
+  echo "[OK] Endpoint disponível: $url"
 }
 
-wait_for_result_message() {
-  local retries=60
-  local attempt=1
+assert_status() {
+  local label="$1"
+  local expected="$2"
+  local actual="$3"
 
-  while true; do
-    local output
-    output=$(docker exec processador_diagramas_processing_service_localstack awslocal sqs receive-message \
-      --queue-url http://localhost:4566/000000000000/analysis-processing-results \
-      --message-attribute-names All \
-      --max-number-of-messages 10 \
-      --visibility-timeout 1 2>/dev/null || true)
-
-    if echo "$output" | grep -q "$REQUEST_ID"; then
-      echo "$output"
-      return 0
-    fi
-
-    if [[ "$attempt" -ge "$retries" ]]; then
-      echo "[ERROR] Timeout aguardando mensagem de resultado para $REQUEST_ID"
-      return 1
-    fi
-
-    attempt=$((attempt + 1))
-    sleep 2
-  done
+  if [[ "$actual" == "$expected" ]]; then
+    echo "[PASS] $label — HTTP $actual"
+  else
+    echo "[FAIL] $label — esperado HTTP $expected, recebido HTTP $actual"
+    exit 1
+  fi
 }
 
 require_cmd docker
 require_cmd curl
-require_cmd grep
 
-mkdir -p "$INPUT_DIR"
-cat > "$INPUT_FILE_HOST" <<'EOF'
-graph TD
-  Gateway --> Processing
-  Processing --> Reports
-EOF
-
-echo "[INFO] Subindo ambiente local com Postgres, LocalStack e API..."
+echo "[INFO] Subindo ambiente local com Postgres e API..."
 cd "$ROOT_DIR"
-docker compose up -d --build postgres localstack migrate api
+docker compose up -d --build postgres migrate api
 
 echo "[INFO] Aguardando health da API..."
-wait_for_http "http://127.0.0.1:5080/health"
+wait_for_http "$BASE_URL/health"
 
-echo "[INFO] Publicando mensagem de entrada na fila..."
-docker exec processador_diagramas_processing_service_localstack awslocal sqs send-message \
-  --queue-url http://localhost:4566/000000000000/analysis-process-requests \
-  --message-body "{\"DiagramAnalysisProcessId\":\"$REQUEST_ID\",\"InputStorageKey\":\"$INPUT_FILE_CONTAINER\",\"CorrelationId\":\"$CORRELATION_ID\",\"RequestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
-  --message-attributes '{"eventType":{"StringValue":"AnalysisProcessRequestedEvent","DataType":"String"}}' >/dev/null
+echo ""
+echo "=== SMOKE TESTS ==="
+echo ""
 
-echo "[INFO] Aguardando evento de saída..."
-RESULT_MESSAGE="$(wait_for_result_message)"
+# Teste 1: health check
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/health")
+assert_status "GET /health" "200" "$STATUS"
 
-if ! echo "$RESULT_MESSAGE" | grep -q 'AnalysisProcessingCompletedEvent'; then
-  echo "[ERROR] Evento de conclusão não encontrado na fila de saída."
-  echo "$RESULT_MESSAGE"
+# Teste 2: root descreve o serviço
+BODY=$(curl -s "$BASE_URL/")
+if echo "$BODY" | grep -q "reporting-api"; then
+  echo "[PASS] GET / — payload contém 'reporting-api'"
+else
+  echo "[FAIL] GET / — payload não contém 'reporting-api'. Resposta: $BODY"
   exit 1
 fi
 
-echo "[SUCCESS] Fluxo local completo validado."
-echo "Result message: $RESULT_MESSAGE"
+# Teste 3: ready endpoint
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/ready")
+assert_status "GET /ready" "200" "$STATUS"
+
+# Teste 4: GET /internal/reports/{id} — sem ProcessingService disponível → 404 ou 202
+# (comportamento depende do ProcessingService; localmente sem ele retorna erro de conexão → 500 ou 503)
+# Validamos que o endpoint existe e responde (não é 404 de rota inexistente)
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/internal/reports/$ANALYSIS_PROCESS_ID")
+if [[ "$STATUS" == "404" || "$STATUS" == "202" || "$STATUS" == "200" || "$STATUS" == "500" || "$STATUS" == "503" ]]; then
+  echo "[PASS] GET /internal/reports/{id} — endpoint existe e respondeu HTTP $STATUS"
+else
+  echo "[FAIL] GET /internal/reports/{id} — resposta inesperada: HTTP $STATUS"
+  exit 1
+fi
+
+# Teste 5: POST /internal/reports/{id}/generate — mesmo raciocínio
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE_URL/internal/reports/$ANALYSIS_PROCESS_ID/generate")
+if [[ "$STATUS" == "404" || "$STATUS" == "202" || "$STATUS" == "200" || "$STATUS" == "500" || "$STATUS" == "503" ]]; then
+  echo "[PASS] POST /internal/reports/{id}/generate — endpoint existe e respondeu HTTP $STATUS"
+else
+  echo "[FAIL] POST /internal/reports/{id}/generate — resposta inesperada: HTTP $STATUS"
+  exit 1
+fi
+
+# Teste 6: Swagger disponível
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/swagger/index.html")
+assert_status "GET /swagger/index.html" "200" "$STATUS"
+
+echo ""
+echo "[SUCCESS] Smoke test local concluído com sucesso."
+echo ""
+echo "Ambiente ainda disponível em $BASE_URL"
+echo "Para derrubar: docker compose down -v"

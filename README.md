@@ -1,126 +1,150 @@
-# ProcessadorDiagramas.ProcessingService
+# ProcessadorDiagramas.ReportingService
 
-Microservico de processamento de diagramas com perfil de worker de dominio e API minima para health e observabilidade.
+Microserviço responsável por **compor e persistir relatórios técnicos estruturados** a partir dos dados brutos de análise de diagramas produzidos pelo ProcessingService.
 
-## Etapas implementadas
+## Responsabilidade
 
-- solution propria em .NET 8
-- separacao em API, Application, Domain e Infrastructure
-- modelagem de dominio para job, resultado bruto e tentativas de processamento
-- contratos de aplicacao para criacao e consulta tecnica de jobs
-- persistencia com EF Core, DbContext, repositorios e migration inicial
-- abstracao de mensageria com consumidor de fila e handler do evento de entrada
-- pipeline interno com leitura do arquivo, pre-processamento especializado por tipo e provider de IA configuravel com fallback dummy para persistencia do resultado bruto
-- publicacao de eventos de inicio, sucesso e falha do processamento via barramento assincrono
-- projeto de testes com smoke tests da API minima, dominio, aplicacao e persistencia
-- host inicial com health checks e logs em JSON
-- base para Docker Compose com API, PostgreSQL, LocalStack e migration job
-- smoke test local do fluxo assíncrono via fila validado ponta a ponta
-- manifests base de Kubernetes para deployment, service e migration job
-- scripts auxiliares para build local no Minikube e deploy em namespace dedicado
-- workflow de CI/CD dedicado para o ProcessingService
+- Montar relatório técnico com componentes identificados, riscos arquiteturais e recomendações
+- Persistir relatórios em banco próprio (PostgreSQL)
+- Expor endpoints internos HTTP REST para consumo pelo API Gateway / BFF
+- Consultar o ProcessingService via REST para obter resultados brutos quando necessário
+- Suportar reconsulta rápida de relatórios já gerados (estratégia de cache persistido)
 
-## Estrutura da solution
+## Endpoints internos
 
-- src/ProcessadorDiagramas.ProcessingService.API
-- src/ProcessadorDiagramas.ProcessingService.Application
-- src/ProcessadorDiagramas.ProcessingService.Domain
-- src/ProcessadorDiagramas.ProcessingService.Infrastructure
-- tests/ProcessadorDiagramas.ProcessingService.Tests
+| Método | Rota | Descrição |
+|--------|------|-----------|
+| `GET`  | `/internal/reports/{analysisProcessId}` | Retorna o relatório (gera sob demanda se ainda não existir) |
+| `POST` | `/internal/reports/{analysisProcessId}/generate` | Força regeneração do relatório (nova versão) |
+| `GET`  | `/health` | Health check |
+| `GET`  | `/ready` | Readiness check |
+| `GET`  | `/` | Informações do serviço |
 
-## Responsabilidade do servico
+### Códigos de resposta
 
-Este servico sera responsavel por consumir eventos de solicitacao de processamento, carregar o diagrama no storage, executar pre-processamento, acionar a IA, persistir a saida bruta e publicar eventos de sucesso ou falha.
+| Código | Significado |
+|--------|-------------|
+| `200`  | Relatório disponível e retornado |
+| `202`  | Processamento ainda não concluído — tente novamente mais tarde |
+| `404`  | Processo de análise não encontrado no ProcessingService |
 
-Nao faz parte deste servico:
+## Estrutura da solução
 
-- upload publico do cliente final
-- orquestracao central de todo o fluxo
-- geracao do relatorio final
-
-## Rodar localmente
-
-```bash
-dotnet restore ProcessadorDiagramas.ProcessingService.sln
-dotnet build ProcessadorDiagramas.ProcessingService.sln
-dotnet test ProcessadorDiagramas.ProcessingService.sln
-dotnet run --project src/ProcessadorDiagramas.ProcessingService.API
+```
+ProcessadorDiagramas.ReportingService/
+├── src/
+│   ├── ProcessadorDiagramas.ReportingService.Domain/        # Entidades, enums, interfaces
+│   ├── ProcessadorDiagramas.ReportingService.Application/   # Handlers, queries, commands, contratos
+│   ├── ProcessadorDiagramas.ReportingService.Infrastructure/ # EF Core, repositórios, client REST
+│   └── ProcessadorDiagramas.ReportingService.API/           # Program.cs, controllers, Swagger
+├── tests/
+│   └── ProcessadorDiagramas.ReportingService.Tests/
+├── deploy/k8s/
+├── Dockerfile
+└── docker-compose.yml
 ```
 
-## Banco e migrations
+## Banco de dados
 
-Migration inicial gerada em:
+PostgreSQL próprio — não compartilhado com outros serviços.
 
-- src/ProcessadorDiagramas.ProcessingService.Infrastructure/Data/Migrations
+**Tabela principal:** `AnalysisReports`
 
-Aplicar localmente:
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `Id` | UUID | PK |
+| `AnalysisProcessId` | UUID | Referência ao processo de análise (único) |
+| `Status` | string | `Pending`, `Generated`, `Failed` |
+| `ComponentsSummary` | text | JSON com componentes identificados |
+| `ArchitecturalRisks` | text | JSON com riscos arquiteturais |
+| `Recommendations` | text | JSON com recomendações |
+| `SourceAnalysisReference` | string | ID do job do ProcessingService que originou o relatório |
+| `Version` | int | Versão do relatório (incrementa a cada regeneração) |
+| `FailureReason` | string | Motivo de falha, se aplicável |
+| `GeneratedAt` | datetime | Quando o relatório foi gerado |
+| `CreatedAt` | datetime | Criação do registro |
+| `UpdatedAt` | datetime | Última atualização |
+
+## Variáveis de ambiente
+
+| Variável | Descrição | Exemplo |
+|----------|-----------|---------|
+| `ConnectionStrings__DefaultConnection` | Connection string PostgreSQL | `Host=postgres;Port=5432;Database=processador_diagramas_reporting;Username=postgres;Password=postgres` |
+| `ProcessingService__BaseUrl` | URL base do ProcessingService | `http://processador-diagramas-processingservice` |
+| `ProcessingService__TimeoutSeconds` | Timeout HTTP para o ProcessingService | `30` |
+| `ASPNETCORE_ENVIRONMENT` | Ambiente | `Development` / `Production` |
+
+## Execução local
+
+### Pré-requisitos
+
+- .NET 8 SDK
+- PostgreSQL local ou via Docker
+
+### Subir com Docker Compose
 
 ```bash
-docker compose up postgres -d
+cd ProcessadorDiagramas.ReportingService
+docker-compose up --build
+```
+
+A API ficará disponível em `http://localhost:5081`.  
+Swagger em `http://localhost:5081/swagger`.
+
+### Rodar localmente (sem Docker)
+
+```bash
+# Inicie um PostgreSQL na porta 5435
+docker run -e POSTGRES_DB=processador_diagramas_reporting \
+           -e POSTGRES_USER=postgres \
+           -e POSTGRES_PASSWORD=postgres \
+           -p 5435:5432 postgres:15-alpine
+
+# Aplicar migrations
 dotnet ef database update \
-	--project src/ProcessadorDiagramas.ProcessingService.Infrastructure/ProcessadorDiagramas.ProcessingService.Infrastructure.csproj \
-	--startup-project src/ProcessadorDiagramas.ProcessingService.API/ProcessadorDiagramas.ProcessingService.API.csproj
+  --project src/ProcessadorDiagramas.ReportingService.Infrastructure \
+  --startup-project src/ProcessadorDiagramas.ReportingService.API
+
+# Executar
+dotnet run --project src/ProcessadorDiagramas.ReportingService.API
 ```
 
-Endpoints disponiveis nesta etapa:
-
-- GET /health
-- GET /ready
-- GET /
-
-## Docker Compose
+### Rodar testes
 
 ```bash
-docker compose up --build
+dotnet test
 ```
 
-API local:
-
-- http://localhost:5080/health
-
-Fluxo local completo com fila:
+## Deploy no Minikube
 
 ```bash
-./scripts/test-docker-compose-flow.sh
+# Build da imagem localmente para o minikube
+eval $(minikube docker-env)
+docker build -t marciocardozodev/processador-diagramas-reportingservice:local .
+
+# Criar secret com a connection string
+kubectl create secret generic processador-diagramas-reportingservice-secrets \
+  --from-literal=ConnectionStrings__DefaultConnection="Host=<postgres-host>;Port=5432;Database=processador_diagramas_reporting;Username=postgres;Password=postgres"
+
+# Aplicar manifests
+kubectl apply -f deploy/k8s/configmap.yaml
+kubectl apply -f deploy/k8s/service.yaml
+kubectl apply -f deploy/k8s/create-db-job.yaml  # Migrations
+kubectl apply -f deploy/k8s/deployment.yaml
 ```
 
-Para usar provider real compatível com OpenAI, configure as variáveis do bloco AiProvider no ambiente da API, por exemplo:
+## Dependências de outros serviços
 
-```bash
-export AiProvider__Enabled=true
-export AiProvider__Provider=OpenAICompatible
-export AiProvider__BaseUrl=https://api.openai.com/
-export AiProvider__ApiKey=seu-token
-export AiProvider__Model=gpt-4o-mini
-```
+| Serviço | Comunicação | Endpoint consultado |
+|---------|-------------|---------------------|
+| ProcessingService | HTTP REST (interno) | `GET /internal/jobs/by-analysis-process/{analysisProcessId}` |
+| API Gateway / BFF | HTTP REST (entrada) | Consome os endpoints deste serviço |
 
-O script sobe Postgres, LocalStack, aplica migrations, publica uma mensagem `AnalysisProcessRequestedEvent` na fila de entrada e valida o evento `AnalysisProcessingCompletedEvent` na fila de saída.
+## Estratégia de geração de relatórios
 
-## Kubernetes
+**Sob demanda com cache persistido:**
 
-Arquivos base de deploy:
-
-- deploy/k8s/deployment.yaml
-- deploy/k8s/service.yaml
-- deploy/k8s/create-db-job.yaml
-
-Scripts auxiliares para cluster local:
-
-```bash
-./scripts/minikube/build-local-image.sh
-IMAGE_TAG=local ./scripts/minikube/deploy.sh
-```
-
-## CI/CD
-
-Workflow dedicado:
-
-- .github/workflows/processing-service-ci-cd.yml
-
-O pipeline restaura, compila, testa, gera a imagem Docker e executa o deploy em Kubernetes para homolog e master.
-
-## Proximas etapas
-
-1. Integrar provider real de IA e pre-processamento especializado por tipo de diagrama.
-2. Evoluir a observabilidade operacional do worker com métricas e tracing.
-3. Refinar contratos de evento com o serviço anterior conforme a integração final.
+1. `GET /internal/reports/{id}` → verifica se já existe relatório `Generated` no banco → retorna (`200`)
+2. Se não existe → consulta ProcessingService → compõe relatório → persiste → retorna (`200`)
+3. Se processamento ainda não concluiu → persiste como `Pending` → retorna (`202`)
+4. `POST /internal/reports/{id}/generate` → força nova versão do relatório (incrementa `Version`)
