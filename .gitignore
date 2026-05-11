@@ -1,0 +1,28 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.log
+
+## Publish
+publish/
+artifacts/
+
+## Secrets locais — NUNCA versionar
+*.secrets.env
+.env.local
+*.local.env
+
+## Rider
+.idea/
+
+## VS Code
+.vscode/
+
+## Docker volumes
+postgres_data/
+
+## dotnet tools
+.config/

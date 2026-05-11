@@ -17,7 +17,7 @@ spec:
       containers:
         - name: processador-diagramas-reportingservice
           image: marciocardozodev/processador-diagramas-reportingservice:${IMAGE_TAG}
-          imagePullPolicy: Always
+          imagePullPolicy: ${IMAGE_PULL_POLICY:-IfNotPresent}
           ports:
             - containerPort: 8080
           envFrom:

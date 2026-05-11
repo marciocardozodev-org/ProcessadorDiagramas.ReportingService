@@ -1,0 +1,274 @@
+name: Homolog Serverless E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - homolog
+      - master
+
+jobs:
+  # ===========================================================================
+  # Job 1: serverless-contract — obrigatório para merge
+  # Resiliente a restrições IAM; pode degradar para api-smoke com diagnóstico.
+  # ===========================================================================
+  serverless-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_REGION:                    us-east-1
+      API_BASE_URL:                  ${{ secrets.HOMOLOG_API_BASE_URL }}
+      S3_BUCKET_NAME:                ${{ secrets.HOMOLOG_UPLOAD_BUCKET || vars.HOMOLOG_UPLOAD_BUCKET }}
+      ANALYSIS_COMPLETED_QUEUE_NAME: ${{ vars.HOMOLOG_ANALYSIS_COMPLETED_QUEUE }}
+      S3_KEY_PREFIX:                 ${{ vars.HOMOLOG_UPLOAD_PREFIX || 'uploads/reporting' }}
+      ARTIFACT_DIR:                  artifacts/serverless-e2e
+      TIMEOUT_SECONDS:               240
+      POLL_INTERVAL_SECONDS:         3
+      REQUIRE_FULL_SERVERLESS:       "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load E2E contract
+        run: |
+          CONTRACT_FILE=".github/e2e/homolog.contract.env"
+          if [[ ! -f "$CONTRACT_FILE" ]]; then
+            echo "Erro: contrato nao encontrado em $CONTRACT_FILE"
+            exit 1
+          fi
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ -z "$line" ]] && continue
+            [[ "$line" == \#* ]] && continue
+            if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+              key="${BASH_REMATCH[1]}"
+              value="${BASH_REMATCH[2]}"
+              if [[ -z "${!key:-}" ]]; then
+                echo "$key=$value" >> "$GITHUB_ENV"
+              fi
+            fi
+          done < "$CONTRACT_FILE"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install tooling
+        run: |
+          command -v jq  >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y jq; }
+          command -v aws >/dev/null 2>&1 || { curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install; }
+
+      - name: Configure AWS credentials
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN:     ${{ secrets.AWS_SESSION_TOKEN }}
+        run: |
+          echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"     >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}" >> "$GITHUB_ENV"
+          echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}"     >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=${AWS_REGION}"           >> "$GITHUB_ENV"
+
+      - name: Preflight — validar credencial AWS
+        run: |
+          if ! aws sts get-caller-identity >/dev/null 2>&1; then
+            echo "AVISO: Credencial AWS inválida ou ausente. Testes de recursos AWS não serão possíveis."
+          else
+            echo "Credencial AWS OK."
+          fi
+          if [[ -z "${API_BASE_URL}" ]]; then
+            echo "AVISO: API_BASE_URL vazio. Será iniciada API local no runner como fallback."
+          fi
+
+      - name: Resolve API endpoint (fallback local)
+        run: |
+          if [[ -n "${API_BASE_URL}" ]]; then
+            echo "API ja definida: ${API_BASE_URL}"
+            exit 0
+          fi
+
+          echo "Iniciando API local como fallback..."
+          ASPNETCORE_ENVIRONMENT=Production \
+          ConnectionStrings__DefaultConnection="" \
+          DatabaseProvider=InMemory \
+          Messaging__Enabled=false \
+          dotnet run \
+            --project src/ProcessadorDiagramas.ReportingService.API/ProcessadorDiagramas.ReportingService.API.csproj \
+            --no-launch-profile \
+            --urls http://127.0.0.1:18080 \
+            >/tmp/reporting-api.log 2>&1 &
+
+          echo "LOCAL_API_PID=$!" >> "$GITHUB_ENV"
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then
+              echo "API local pronta (tentativa $i)."
+              break
+            fi
+            sleep 2
+          done
+
+          if ! curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then
+            echo "=== LOG API LOCAL ===" && cat /tmp/reporting-api.log || true
+            echo "ERRO: API local não subiu a tempo." >&2
+            exit 1
+          fi
+
+          echo "API_BASE_URL=http://127.0.0.1:18080" >> "$GITHUB_ENV"
+
+      - name: Write execution config
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          jq -n \
+            --arg executionMode            "serverless-contract" \
+            --arg awsRegion                "${AWS_REGION}" \
+            --arg apiBaseUrl               "${API_BASE_URL}" \
+            --arg s3Bucket                 "${S3_BUCKET_NAME}" \
+            --arg completedQueue           "${ANALYSIS_COMPLETED_QUEUE_NAME}" \
+            --arg s3KeyPrefix              "${S3_KEY_PREFIX}" \
+            --arg timeoutSeconds           "${TIMEOUT_SECONDS}" \
+            --arg pollIntervalSeconds      "${POLL_INTERVAL_SECONDS}" \
+            --arg requireFullServerless    "${REQUIRE_FULL_SERVERLESS}" \
+            '{
+              executionMode:         $executionMode,
+              awsRegion:             $awsRegion,
+              apiBaseUrl:            $apiBaseUrl,
+              s3Bucket:              $s3Bucket,
+              completedQueue:        $completedQueue,
+              s3KeyPrefix:           $s3KeyPrefix,
+              timeoutSeconds:        $timeoutSeconds,
+              pollIntervalSeconds:   $pollIntervalSeconds,
+              requireFullServerless: $requireFullServerless,
+              generatedAtUtc:        now | todateiso8601
+            }' > "${ARTIFACT_DIR}/execution-config.json"
+          cat "${ARTIFACT_DIR}/execution-config.json"
+
+      - name: Run serverless contract test
+        run: |
+          chmod +x scripts/e2e-serverless.sh
+          ./scripts/e2e-serverless.sh
+
+      - name: Stop local API fallback
+        if: always()
+        run: |
+          if [[ -n "${LOCAL_API_PID:-}" ]]; then
+            kill "${LOCAL_API_PID}" >/dev/null 2>&1 || true
+            echo "API local (PID ${LOCAL_API_PID}) encerrada."
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: homolog-serverless-contract
+          path: artifacts/serverless-e2e
+          if-no-files-found: warn
+
+  # ===========================================================================
+  # Job 2: serverless-full — diagnóstico, strict, continue-on-error
+  # Exige caminho completo sem fallback silencioso. Evidencia lacunas IAM/infra.
+  # ===========================================================================
+  serverless-full:
+    needs: serverless-contract
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_REGION:                    us-east-1
+      API_BASE_URL:                  ${{ secrets.HOMOLOG_API_BASE_URL }}
+      S3_BUCKET_NAME:                ${{ secrets.HOMOLOG_UPLOAD_BUCKET || vars.HOMOLOG_UPLOAD_BUCKET }}
+      ANALYSIS_COMPLETED_QUEUE_NAME: ${{ vars.HOMOLOG_ANALYSIS_COMPLETED_QUEUE }}
+      S3_KEY_PREFIX:                 ${{ vars.HOMOLOG_UPLOAD_PREFIX || 'uploads/reporting' }}
+      ARTIFACT_DIR:                  artifacts/serverless-e2e-full
+      TIMEOUT_SECONDS:               240
+      POLL_INTERVAL_SECONDS:         3
+      REQUIRE_FULL_SERVERLESS:       "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load E2E contract
+        run: |
+          CONTRACT_FILE=".github/e2e/homolog.contract.env"
+          if [[ ! -f "$CONTRACT_FILE" ]]; then
+            echo "Erro: contrato nao encontrado em $CONTRACT_FILE"
+            exit 1
+          fi
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ -z "$line" ]] && continue
+            [[ "$line" == \#* ]] && continue
+            if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+              key="${BASH_REMATCH[1]}"
+              value="${BASH_REMATCH[2]}"
+              if [[ -z "${!key:-}" ]]; then
+                echo "$key=$value" >> "$GITHUB_ENV"
+              fi
+            fi
+          done < "$CONTRACT_FILE"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install tooling
+        run: |
+          command -v jq  >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y jq; }
+          command -v aws >/dev/null 2>&1 || { curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install; }
+
+      - name: Configure AWS credentials
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN:     ${{ secrets.AWS_SESSION_TOKEN }}
+        run: |
+          echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"     >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}" >> "$GITHUB_ENV"
+          echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}"     >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=${AWS_REGION}"           >> "$GITHUB_ENV"
+
+      - name: Write execution config
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          jq -n \
+            --arg executionMode            "serverless-full-strict" \
+            --arg awsRegion                "${AWS_REGION}" \
+            --arg apiBaseUrl               "${API_BASE_URL:-<não definido>}" \
+            --arg s3Bucket                 "${S3_BUCKET_NAME:-<não definido>}" \
+            --arg completedQueue           "${ANALYSIS_COMPLETED_QUEUE_NAME:-<não definido>}" \
+            --arg s3KeyPrefix              "${S3_KEY_PREFIX}" \
+            --arg timeoutSeconds           "${TIMEOUT_SECONDS}" \
+            --arg pollIntervalSeconds      "${POLL_INTERVAL_SECONDS}" \
+            --arg requireFullServerless    "${REQUIRE_FULL_SERVERLESS}" \
+            '{
+              executionMode:         $executionMode,
+              awsRegion:             $awsRegion,
+              apiBaseUrl:            $apiBaseUrl,
+              s3Bucket:              $s3Bucket,
+              completedQueue:        $completedQueue,
+              s3KeyPrefix:           $s3KeyPrefix,
+              timeoutSeconds:        $timeoutSeconds,
+              pollIntervalSeconds:   $pollIntervalSeconds,
+              requireFullServerless: $requireFullServerless,
+              generatedAtUtc:        now | todateiso8601
+            }' > "${ARTIFACT_DIR}/execution-config.json"
+          cat "${ARTIFACT_DIR}/execution-config.json"
+
+      - name: Run full serverless test (strict)
+        run: |
+          chmod +x scripts/e2e-serverless.sh
+          REQUIRE_FULL_SERVERLESS=true ./scripts/e2e-serverless.sh
+
+      - name: Upload full artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: homolog-serverless-full
+          path: artifacts/serverless-e2e-full
+          if-no-files-found: warn

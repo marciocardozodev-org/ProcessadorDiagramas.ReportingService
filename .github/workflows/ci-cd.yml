@@ -1,0 +1,238 @@
+name: CI/CD — ProcessadorDiagramas.ReportingService
+
+on:
+  push:
+    branches: [develop, homolog, master]
+  pull_request:
+    branches: [develop, homolog, master]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: 8.0.x
+  IMAGE_NAME: marciocardozodev/processador-diagramas-reportingservice
+  K8S_NAMESPACE: ${{ vars.HOMOLOG_K8S_NAMESPACE || vars.K8S_NAMESPACE || 'homolog' }}
+  AWS_REGION: us-east-1
+
+jobs:
+  # =========================================================================
+  # Job 1: build-and-test
+  # Roda em todo PR e push. Gate de qualidade obrigatório.
+  # =========================================================================
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ProcessadorDiagramas.ReportingService.slnx
+
+      - name: Build
+        run: dotnet build ProcessadorDiagramas.ReportingService.slnx --no-restore -c Release
+
+      - name: Test
+        run: |
+          dotnet test ProcessadorDiagramas.ReportingService.slnx \
+            --no-build \
+            -c Release \
+            --logger "trx;LogFileName=test-results.trx" \
+            --results-directory artifacts/test-results
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: artifacts/test-results
+          if-no-files-found: warn
+
+  # =========================================================================
+  # Job 2: e2e-local-service
+  # Valida somente este microserviço (docker compose local), sem integração externa.
+  # =========================================================================
+  e2e-local-service:
+    name: E2E Local Service
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run local E2E smoke
+        run: |
+          chmod +x scripts/test-docker-compose-flow.sh
+          ./scripts/test-docker-compose-flow.sh
+
+      - name: Export docker compose logs
+        if: always()
+        run: |
+          mkdir -p artifacts/e2e-local
+          docker compose logs --no-color > artifacts/e2e-local/docker-compose.log || true
+
+      - name: Upload local E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-local-${{ github.run_id }}
+          path: artifacts/e2e-local
+          if-no-files-found: warn
+
+      - name: Teardown docker compose
+        if: always()
+        run: docker compose down -v --remove-orphans || true
+
+  # =========================================================================
+  # Job 3: build-and-push-image
+  # Roda apenas em develop/homolog/master. Publica imagem no Docker Hub.
+  # =========================================================================
+  build-and-push-image:
+    name: Build & Push Docker Image
+    needs: [build-and-test, e2e-local-service]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request'
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      image_full: ${{ steps.meta.outputs.image_full }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          BRANCH="${GITHUB_REF_NAME//\//-}"
+          TAG="${BRANCH}-${SHORT_SHA}"
+          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_full=${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Tag calculada: ${TAG}"
+
+      - name: Login Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.image_tag }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # =========================================================================
+  # Job 4: deploy-homolog
+  # Roda apenas em homolog/master. Deploy no EKS + migrate.
+  # =========================================================================
+  deploy-homolog:
+    name: Deploy Homolog (EKS)
+    needs: build-and-push-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.ref_name == 'homolog' || github.ref_name == 'master'
+    environment: homolog
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN:     ${{ secrets.AWS_SESSION_TOKEN }}
+        run: |
+          aws configure set aws_access_key_id     "${AWS_ACCESS_KEY_ID}"
+          aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
+          aws configure set aws_session_token     "${AWS_SESSION_TOKEN}"
+          aws configure set region                "${AWS_REGION}"
+
+      - name: Preflight — validar credencial AWS
+        run: aws sts get-caller-identity
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig (EKS)
+        run: |
+          aws eks update-kubeconfig \
+            --region "${AWS_REGION}" \
+            --name "${{ vars.EKS_CLUSTER_NAME || 'processador-diagramas-shared-eks' }}"
+
+      - name: Verificar conexão com cluster
+        run: kubectl cluster-info
+
+      - name: Substituir IMAGE_TAG e IMAGE_PULL_POLICY nos manifests
+        run: |
+          export IMAGE_TAG="${{ needs.build-and-push-image.outputs.image_tag }}"
+          export IMAGE_PULL_POLICY="Always"
+          envsubst '${IMAGE_TAG} ${IMAGE_PULL_POLICY}' < deploy/k8s/create-db-job.yaml > /tmp/migration-job.yaml
+          envsubst '${IMAGE_TAG} ${IMAGE_PULL_POLICY}' < deploy/k8s/deployment.yaml    > /tmp/deployment.yaml
+          cp deploy/k8s/configmap.yaml /tmp/configmap.yaml
+          cp deploy/k8s/service.yaml   /tmp/service.yaml
+
+      - name: Apply ConfigMap e Service
+        run: |
+          kubectl apply -f /tmp/configmap.yaml  -n "${K8S_NAMESPACE}"
+          kubectl apply -f /tmp/service.yaml    -n "${K8S_NAMESPACE}"
+
+      - name: Apply e aguardar Migration Job
+        run: |
+          kubectl delete job processador-diagramas-reportingservice-migrations \
+            -n "${K8S_NAMESPACE}" --ignore-not-found
+          kubectl apply -f /tmp/migration-job.yaml -n "${K8S_NAMESPACE}"
+          kubectl wait job/processador-diagramas-reportingservice-migrations \
+            --for=condition=complete \
+            --timeout=120s \
+            -n "${K8S_NAMESPACE}" || {
+              echo "=== LOG DO JOB DE MIGRAÇÃO ===" >&2
+              kubectl logs -l job-name=processador-diagramas-reportingservice-migrations \
+                -n "${K8S_NAMESPACE}" --tail=100 >&2 || true
+              exit 1
+            }
+
+      - name: Apply Deployment
+        run: |
+          kubectl apply -f /tmp/deployment.yaml -n "${K8S_NAMESPACE}"
+
+      - name: Aguardar Deployment ficar pronto
+        run: |
+          kubectl rollout status deployment/processador-diagramas-reportingservice \
+            -n "${K8S_NAMESPACE}" \
+            --timeout=120s || {
+              echo "=== DESCRIBE DEPLOYMENT ===" >&2
+              kubectl describe deployment/processador-diagramas-reportingservice \
+                -n "${K8S_NAMESPACE}" >&2 || true
+              echo "=== PODS ===" >&2
+              kubectl get pods -l app=processador-diagramas-reportingservice \
+                -n "${K8S_NAMESPACE}" -o wide >&2 || true
+              exit 1
+            }
+
+      - name: Resumo do deploy
+        run: |
+          echo "=== Deployment concluído ==="
+          kubectl get deployment/processador-diagramas-reportingservice \
+            -n "${K8S_NAMESPACE}" -o wide
+          kubectl get pods -l app=processador-diagramas-reportingservice \
+            -n "${K8S_NAMESPACE}"
