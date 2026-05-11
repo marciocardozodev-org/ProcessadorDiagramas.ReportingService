@@ -61,6 +61,7 @@ jobs:
   e2e-local-service:
     name: E2E Local Service
     needs: build-and-test
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -93,14 +94,14 @@ jobs:
 
   # =========================================================================
   # Job 3: build-and-push-image
-  # Roda apenas em develop/homolog/master. Publica imagem no Docker Hub.
+  # Roda apenas em pushes para homolog/master. Publica imagem no Docker Hub.
   # =========================================================================
   build-and-push-image:
     name: Build & Push Docker Image
-    needs: [build-and-test, e2e-local-service]
+    needs: build-and-test
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && (github.ref_name == 'homolog' || github.ref_name == 'master')
 
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}

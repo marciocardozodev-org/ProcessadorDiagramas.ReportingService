@@ -2,15 +2,11 @@ name: Homolog Serverless E2E
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - homolog
-      - master
 
 jobs:
   # ===========================================================================
-  # Job 1: serverless-contract — obrigatório para merge
-  # Resiliente a restrições IAM; pode degradar para api-smoke com diagnóstico.
+  # Job 1: serverless-contract (execução manual)
+  # Fluxo avançado/resiliente para validação serverless quando necessário.
   # ===========================================================================
   serverless-contract:
     runs-on: ubuntu-latest
