@@ -7,7 +7,8 @@ Microserviço responsável por **compor e persistir relatórios técnicos estrut
 - Montar relatório técnico com componentes identificados, riscos arquiteturais e recomendações
 - Persistir relatórios em banco próprio (PostgreSQL)
 - Expor endpoints internos HTTP REST para consumo pelo API Gateway / BFF
-- Consultar o ProcessingService via REST para obter resultados brutos quando necessário
+- Consumir eventos assíncronos do ProcessingService via SQS para gerar relatórios automaticamente
+- Manter compatibilidade com o fluxo HTTP legado quando o evento ainda não trouxer o contrato V2 completo
 - Suportar reconsulta rápida de relatórios já gerados (estratégia de cache persistido)
 
 ## Endpoints internos
@@ -137,8 +138,34 @@ kubectl apply -f deploy/k8s/deployment.yaml
 
 | Serviço | Comunicação | Endpoint consultado |
 |---------|-------------|---------------------|
-| ProcessingService | HTTP REST (interno) | `GET /internal/jobs/by-analysis-process/{analysisProcessId}` |
+| ProcessingService | SQS como caminho principal, HTTP REST como fallback legado | Evento `AnalysisProcessingCompletedV2` e, em compatibilidade, `GET /internal/jobs/by-analysis-process/{analysisProcessId}` |
 | API Gateway / BFF | HTTP REST (entrada) | Consome os endpoints deste serviço |
+
+## Contrato assíncrono
+
+O evento canônico consumido pelo ReportingService é o `AnalysisProcessingCompletedV2`.
+
+Campos esperados no payload:
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `EventType` | string | Deve ser `AnalysisProcessingCompletedV2` |
+| `AnalysisProcessId` | uuid | Identificador da análise |
+| `RawAiOutput` | string | Saída bruta do ProcessingService usada para compor o relatório |
+| `SourceAnalysisReference` | string | Referência de origem do job no ProcessingService |
+| `CorrelationId` | string | Correlação opcional para rastreio |
+
+Exemplo:
+
+```json
+{
+  "EventType": "AnalysisProcessingCompletedV2",
+  "AnalysisProcessId": "52495323-3413-4444-824c-c6782f7025eb",
+  "RawAiOutput": "{\"components\":[\"API\",\"Worker\"],\"risks\":[\"sync dependency\"]}",
+  "SourceAnalysisReference": "job-123",
+  "CorrelationId": "corr-1"
+}
+```
 
 ## Estratégia de geração de relatórios
 

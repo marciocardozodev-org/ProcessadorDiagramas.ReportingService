@@ -2,14 +2,17 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
-COPY ProcessadorDiagramas.ReportingService.sln ./
+COPY ProcessadorDiagramas.ReportingService.slnx ./
 COPY src/ProcessadorDiagramas.ReportingService.API/ProcessadorDiagramas.ReportingService.API.csproj src/ProcessadorDiagramas.ReportingService.API/
 COPY src/ProcessadorDiagramas.ReportingService.Application/ProcessadorDiagramas.ReportingService.Application.csproj src/ProcessadorDiagramas.ReportingService.Application/
 COPY src/ProcessadorDiagramas.ReportingService.Domain/ProcessadorDiagramas.ReportingService.Domain.csproj src/ProcessadorDiagramas.ReportingService.Domain/
 COPY src/ProcessadorDiagramas.ReportingService.Infrastructure/ProcessadorDiagramas.ReportingService.Infrastructure.csproj src/ProcessadorDiagramas.ReportingService.Infrastructure/
 COPY tests/ProcessadorDiagramas.ReportingService.Tests/ProcessadorDiagramas.ReportingService.Tests.csproj tests/ProcessadorDiagramas.ReportingService.Tests/
 
-RUN dotnet restore ProcessadorDiagramas.ReportingService.sln --verbosity minimal
+RUN dotnet restore src/ProcessadorDiagramas.ReportingService.Domain/ProcessadorDiagramas.ReportingService.Domain.csproj --verbosity minimal
+RUN dotnet restore src/ProcessadorDiagramas.ReportingService.Application/ProcessadorDiagramas.ReportingService.Application.csproj --verbosity minimal
+RUN dotnet restore src/ProcessadorDiagramas.ReportingService.Infrastructure/ProcessadorDiagramas.ReportingService.Infrastructure.csproj --verbosity minimal
+RUN dotnet restore src/ProcessadorDiagramas.ReportingService.API/ProcessadorDiagramas.ReportingService.API.csproj --verbosity minimal
 RUN dotnet tool install --global dotnet-ef --version 8.0.0
 
 ENV PATH="${PATH}:/root/.dotnet/tools"

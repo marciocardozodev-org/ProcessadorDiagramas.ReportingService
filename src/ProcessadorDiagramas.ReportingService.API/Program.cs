@@ -12,8 +12,9 @@ builder.Logging.AddJsonConsole();
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration, builder.Environment);
 
-builder.Services.AddHealthChecks()
-    .AddDbContextCheck<AppDbContext>("database");
+var hcBuilder = builder.Services.AddHealthChecks();
+if (!string.Equals(builder.Configuration["DatabaseProvider"], "InMemory", StringComparison.OrdinalIgnoreCase))
+    hcBuilder.AddDbContextCheck<AppDbContext>("database");
 
 builder.Services.AddProblemDetails();
 
