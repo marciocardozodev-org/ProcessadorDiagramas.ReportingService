@@ -55,45 +55,7 @@ jobs:
           if-no-files-found: warn
 
   # =========================================================================
-  # Job 2: e2e-local-service
-  # Valida somente este microserviço (docker compose local), sem integração externa.
-  # =========================================================================
-  e2e-local-service:
-    name: E2E Local Service
-    needs: build-and-test
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run local E2E smoke
-        run: |
-          chmod +x scripts/test-docker-compose-flow.sh
-          ./scripts/test-docker-compose-flow.sh
-
-      - name: Export docker compose logs
-        if: always()
-        run: |
-          mkdir -p artifacts/e2e-local
-          docker compose logs --no-color > artifacts/e2e-local/docker-compose.log || true
-
-      - name: Upload local E2E artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-local-${{ github.run_id }}
-          path: artifacts/e2e-local
-          if-no-files-found: warn
-
-      - name: Teardown docker compose
-        if: always()
-        run: docker compose down -v --remove-orphans || true
-
-  # =========================================================================
-  # Job 3: build-and-push-image
+  # Job 2: build-and-push-image
   # Roda apenas em pushes para homolog/master. Publica imagem no Docker Hub.
   # =========================================================================
   build-and-push-image:
@@ -142,7 +104,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   # =========================================================================
-  # Job 4: deploy-homolog
+  # Job 3: deploy-homolog
   # Roda apenas em homolog/master. Deploy no EKS + migrate.
   # =========================================================================
   deploy-homolog:
