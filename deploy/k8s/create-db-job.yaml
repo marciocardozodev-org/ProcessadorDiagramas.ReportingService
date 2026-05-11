@@ -16,7 +16,7 @@ spec:
       containers:
         - name: migrations
           image: marciocardozodev/processador-diagramas-reportingservice:${IMAGE_TAG}
-          imagePullPolicy: ${IMAGE_PULL_POLICY:-IfNotPresent}
+          imagePullPolicy: ${IMAGE_PULL_POLICY}
           envFrom:
             - secretRef:
                 name: processador-diagramas-reportingservice-secrets
