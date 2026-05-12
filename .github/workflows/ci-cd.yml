@@ -145,6 +145,24 @@ jobs:
       - name: Verificar conexão com cluster
         run: kubectl cluster-info
 
+      - name: Garantir namespace de deploy
+        run: |
+          kubectl create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Garantir secret do serviço
+        env:
+          DEFAULT_CONNECTION: ${{ secrets.HOMOLOG_DB_CONNECTION_STRING }}
+        run: |
+          if [[ -z "${DEFAULT_CONNECTION}" ]]; then
+            echo "Erro: secret HOMOLOG_DB_CONNECTION_STRING não configurado no GitHub." >&2
+            exit 1
+          fi
+
+          kubectl create secret generic processador-diagramas-reportingservice-secrets \
+            --from-literal=ConnectionStrings__DefaultConnection="${DEFAULT_CONNECTION}" \
+            -n "${K8S_NAMESPACE}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Substituir IMAGE_TAG e IMAGE_PULL_POLICY nos manifests
         run: |
           export IMAGE_TAG="${{ needs.build-and-push-image.outputs.image_tag }}"
