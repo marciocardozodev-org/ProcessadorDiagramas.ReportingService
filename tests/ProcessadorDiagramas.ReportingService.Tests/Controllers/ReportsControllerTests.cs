@@ -153,6 +153,38 @@ public sealed class ReportsControllerTests : IClassFixture<ReportsControllerTest
         httpResponse.StatusCode.Should().Be(HttpStatusCode.Accepted);
     }
 
+    // POST /internal/reports/{id}/generate — regeneração com versão incrementada
+    [Fact]
+    public async Task GenerateReport_WhenExistingReportRegenerated_IncrementsVersion()
+    {
+        var analysisProcessId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        var rawOutput = """{"components":"[API v2]","risks":"[new risk]","recommendations":"[new rec]"}""";
+
+        // Primeiro relatório já gerado (versão 1)
+        var existingReport = AnalysisReport.CreatePending(analysisProcessId);
+        existingReport.MarkAsGenerated("[{\"old\":\"v1\"}]", "[{\"old\":\"risk\"}]", "[{\"old\":\"rec\"}]", "old-job-id");
+
+        _reportRepositoryMock
+            .Setup(r => r.GetByAnalysisProcessIdAsync(analysisProcessId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existingReport);
+
+        _processingClientMock
+            .Setup(c => c.GetJobByAnalysisProcessIdAsync(analysisProcessId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ProcessingJobResult(jobId, analysisProcessId, "Completed", rawOutput, DateTime.UtcNow));
+
+        _reportRepositoryMock
+            .Setup(r => r.UpdateAsync(It.IsAny<AnalysisReport>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        var httpResponse = await _httpClient.PostAsync($"/internal/reports/{analysisProcessId}/generate", null);
+
+        httpResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await httpResponse.Content.ReadFromJsonAsync<GetOrGenerateAnalysisReportResponse>();
+        body!.Version.Should().Be(2);
+        body.SourceAnalysisReference.Should().Be(jobId.ToString());
+    }
+
     // Factory dedicada que injeta mocks de repositório e client
     public sealed class ControllerTestFactory : WebApplicationFactory<Program>
     {

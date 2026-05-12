@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using ProcessadorDiagramas.ReportingService.Application.Interfaces;
+using ProcessadorDiagramas.ReportingService.Application.Queries.GetOrGenerateAnalysisReport;
 using ProcessadorDiagramas.ReportingService.Infrastructure.BackgroundServices;
 
 namespace ProcessadorDiagramas.ReportingService.Tests.Infrastructure.BackgroundServices;
@@ -147,6 +148,51 @@ public sealed class AnalysisCompletedMessageProcessorTests
         generationServiceMock.VerifyNoOtherCalls();
         sqsMock.Verify(
             c => c.DeleteMessageAsync(queueUrl, "rh-2", It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_V2MessageWithoutRawAiOutput_DeletesMessageWithWarning()
+    {
+        var analysisProcessId = Guid.NewGuid();
+        var queueUrl = "https://sqs.us-east-1.amazonaws.com/123456789012/analysis-completed";
+        var message = new Message
+        {
+            MessageId = "msg-v2-incomplete",
+            ReceiptHandle = "rh-v2-incomplete",
+            Body = $$"""{"EventType":"AnalysisProcessingCompletedV2","AnalysisProcessId":"{{analysisProcessId}}","SourceAnalysisReference":"job-123","CorrelationId":"corr-1"}"""
+            // Nota: sem RawAiOutput
+        };
+
+        var generationServiceMock = new Mock<IAnalysisReportGenerationService>(MockBehavior.Strict);
+
+        var scope = new Mock<IServiceScope>();
+        var serviceProvider = new Mock<IServiceProvider>();
+        serviceProvider
+            .Setup(p => p.GetService(typeof(IAnalysisReportGenerationService)))
+            .Returns(generationServiceMock.Object);
+        scope.SetupGet(s => s.ServiceProvider).Returns(serviceProvider.Object);
+
+        var scopeFactory = new Mock<IServiceScopeFactory>();
+        scopeFactory.Setup(f => f.CreateScope()).Returns(scope.Object);
+
+        var sqsMock = new Mock<IAmazonSQS>();
+        sqsMock
+            .Setup(c => c.DeleteMessageAsync(queueUrl, "rh-v2-incomplete", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new DeleteMessageResponse());
+
+        var processor = new AnalysisCompletedMessageProcessor(
+            scopeFactory.Object,
+            sqsMock.Object,
+            NullLogger<AnalysisCompletedMessageProcessor>.Instance);
+
+        await processor.ProcessAsync(message, queueUrl, default);
+
+        // GenerationService não deve ser chamado
+        generationServiceMock.VerifyNoOtherCalls();
+        // Mas a mensagem deve ser deletada (ignorada)
+        sqsMock.Verify(
+            c => c.DeleteMessageAsync(queueUrl, "rh-v2-incomplete", It.IsAny<CancellationToken>()),
             Times.Once);
     }
 }
