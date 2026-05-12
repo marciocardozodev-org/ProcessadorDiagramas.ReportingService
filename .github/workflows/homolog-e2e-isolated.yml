@@ -1,0 +1,63 @@
+name: Homolog E2E Isolado — ReportingService
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # ===========================================================================
+  # Valida o ReportingService de forma isolada, sem dependência do ProcessingService.
+  # Fluxo:
+  #   1. Publica mensagem SQS mock simulando o ProcessingService
+  #   2. Aguarda o serviço consumir e persistir via polling na API
+  #   3. Acessa a API via port-forward (sem expor o serviço externamente)
+  # ===========================================================================
+  e2e-isolated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AWS_REGION:                    us-east-1
+      K8S_NAMESPACE:                 ${{ vars.HOMOLOG_K8S_NAMESPACE || vars.K8S_NAMESPACE || 'homolog' }}
+      K8S_SERVICE_NAME:              processador-diagramas-reportingservice
+      ANALYSIS_COMPLETED_QUEUE_NAME: ${{ vars.HOMOLOG_ANALYSIS_COMPLETED_QUEUE || 'upload-orchestrator-analysis-completed' }}
+      LOCAL_PORT:                    18080
+      TIMEOUT_SECONDS:               60
+      POLL_INTERVAL_SECONDS:         3
+      ARTIFACT_DIR:                  artifacts/e2e-isolated
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN:     ${{ secrets.AWS_SESSION_TOKEN }}
+        run: |
+          aws configure set aws_access_key_id     "${AWS_ACCESS_KEY_ID}"
+          aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
+          aws configure set aws_session_token     "${AWS_SESSION_TOKEN}"
+          aws configure set region                "${AWS_REGION}"
+
+      - name: Validar credencial AWS
+        run: aws sts get-caller-identity
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig (EKS)
+        run: |
+          aws eks update-kubeconfig \
+            --region "${AWS_REGION}" \
+            --name "${{ vars.EKS_CLUSTER_NAME || 'processador-diagramas-shared-eks' }}"
+
+      - name: Executar E2E isolado
+        run: bash scripts/e2e-isolated.sh
+
+      - name: Upload artefatos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-isolated-artifacts-${{ github.run_number }}
+          path: artifacts/e2e-isolated/
+          retention-days: 7

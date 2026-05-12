@@ -1,229 +1,142 @@
-# 🧹 AWS Cleanup & Setup — AWS Academy Daily Management
+# AWS Cleanup & Setup — AWS Academy Daily Management
 
-Para evitar custos desnecessários em **AWS Academy**, este guia fornece scripts para **limpar recursos no final do dia** e **recriá-los no início do próximo**.
+Guia para encerrar o dia com custo baixo no AWS Academy e deixar a retomada pronta para o próximo dia.
 
----
+## Cenário atual
 
-## 📋 Recursos que geram custos
+- RDS compartilhada: `processador-diagramas-pg-hml`
+- Database do ReportingService: `processador_diagramas_reporting`
+- Usuário de aplicação: `reporting_service`
+- Secret Manager do serviço: `/homolog/reportingservice/db-credentials`
+- Secret Manager do master compartilhado: `/homolog/shared-rds/master-credentials`
+- Cluster EKS compartilhado: `processador-diagramas-shared-eks`
 
-- **S3 buckets** (armazenamento)
-- **SQS queues** (mensageria além de limite gratuito)
-- **RDS instances** (banco de dados)
-- **ECR repositories** (privados além de limite gratuito)
-- **EKS cluster** (se não estiver no tier gratuito)
+Isso muda a regra do cleanup: recursos recriáveis e deploy podem ser removidos ao fim do dia, mas a RDS compartilhada não deve ser destruída por padrão.
 
----
+## O que o cleanup atual faz
 
-## 🧹 Cleanup — Ao final do dia
+- Remove filas SQS do ecossistema Processador Diagramas
+- Remove buckets S3 do ecossistema Processador Diagramas
+- Remove repositórios ECR do ecossistema Processador Diagramas
+- Remove recursos do ReportingService no namespace `homolog` do EKS
+- Opcionalmente captura um snapshot local com instruções de retomada
+- Não remove a RDS compartilhada por padrão
 
-### 1. **Dry-run** (visualizar o que será deletado)
+## Final do dia
 
-```bash
-./scripts/aws-cleanup.sh
-```
-
-Output:
-```
-=== AWS Cleanup — Região: us-east-1 ===
-
---- [SQS] Listando e limpando filas ---
-  [DRY-RUN] Deletar fila SQS: processador-diagramas-processingservice-hml-queue
-  [DRY-RUN] Deletar fila SQS: upload-orchestrator-analysis-completed
-  ...
-
-Execute novamente com --confirm para deletar recursos:
-  ./scripts/aws-cleanup.sh --confirm
-```
-
-### 2. **Executar limpeza** (com confirmação)
+### 1. Dry-run com snapshot local
 
 ```bash
-./scripts/aws-cleanup.sh --confirm
+./scripts/aws-cleanup.sh --capture-state
 ```
 
-Output:
-```
-=== AWS Cleanup — Região: us-east-1 ===
+Isso grava um snapshot em `artifacts/end-of-day/` com:
 
---- [SQS] Listando e limpando filas ---
-  [EXECUTANDO] Deletar fila SQS: processador-diagramas-processingservice-hml-queue
-  ✓ Fila deletada: processador-diagramas-processingservice-hml-queue
-  ...
+- lembretes de retomada
+- dados do banco do ReportingService
+- nomes dos workflows relevantes
 
-=== Cleanup Completo ===
-Todos os recursos foram removidos.
-```
-
----
-
-## 🚀 Setup — Ao início do próximo dia
-
-### 1. **Obter ID da conta AWS**
+### 2. Cleanup efetivo
 
 ```bash
-aws sts get-caller-identity --query Account --output text
+./scripts/aws-cleanup.sh --capture-state --confirm
 ```
 
-### 2. **Criar recursos**
+Fluxo esperado:
+
+- SQS removida
+- S3 removido
+- ECR removido
+- deployment/service/job/secret/configmap do ReportingService removidos do namespace `homolog`
+- snapshot local salvo para o dia seguinte
+
+### 3. Se existir uma RDS dedicada descartável
+
+Somente quando houver uma instância dedicada e descartável:
 
 ```bash
-AWS_ACCOUNT_ID=767398027345 ./scripts/aws-setup-resources.sh
+./scripts/aws-cleanup.sh --capture-state --include-rds --confirm
 ```
 
-Output:
-```
-=== AWS Setup — Conta: 767398027345, Região: us-east-1 ===
+No cenário atual, `processador-diagramas-pg-hml` é compartilhada e não deve ser removida por este repositório.
 
---- [S3] Criando buckets ---
-  Criando: processador-diagramas-processingservice-hml-inputs-767398027345
-  ✓ Bucket criado: processador-diagramas-processingservice-hml-inputs-767398027345
-  ...
+## Início do próximo dia
 
---- [SQS] Criando filas ---
-  Criando: processador-diagramas-processingservice-hml-queue
-  ✓ Fila criada: processador-diagramas-processingservice-hml-queue
-    URL: https://queue.amazonaws.com/767398027345/processador-diagramas-processingservice-hml-queue
-  ...
-
-=== Setup Completo ===
-
-Recursos criados:
-  S3 Buckets: 2
-  SQS Queues: 4
-  ECR Repos: 1
-```
-
----
-
-## 📅 Daily Workflow (AWS Academy)
-
-### **Final do dia (17h)**
+### 1. Exportar novas credenciais AWS Academy
 
 ```bash
-# Revisar o que será deletado
-./scripts/aws-cleanup.sh
-
-# ✅ Após revisar, executar limpeza
-./scripts/aws-cleanup.sh --confirm
-
-# ✓ Confirmar via console AWS que recursos foram removidos
-# (SQS, S3, ECR não devem aparecer mais)
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_SESSION_TOKEN=...
+export AWS_DEFAULT_REGION=us-east-1
 ```
 
-### **Início do próximo dia (9h)**
+### 2. Recriar recursos base
 
 ```bash
-# Obter ID da conta
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
-# Recriar recursos
 AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}" ./scripts/aws-setup-resources.sh
-
-# Verificar que contrato foi atualizado
-cat .github/e2e/homolog.contract.env | grep S3_BUCKET_NAME
-
-# Testar E2E local
-./scripts/run-e2e-local.sh
-
-# Se tudo OK, fazer push para ativar pipeline
-git push origin develop
 ```
 
----
+### 3. Atualizar GitHub secrets temporários da sessão
 
-## 🔍 Verificação manual (AWS Console)
+Atualize no GitHub:
 
-### **Antes de limpar (dry-run)**
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_SESSION_TOKEN`
+
+Garanta também que `HOMOLOG_DB_CONNECTION_STRING` continua configurado.
+
+### 4. Fazer deploy novamente
 
 ```bash
-# Listar SQS
-aws sqs list-queues --region us-east-1
+git push origin homolog
+```
 
-# Listar S3
+### 5. Validar o serviço
+
+- Rodar a pipeline `ci-cd.yml`
+- Rodar o workflow manual `Homolog E2E Isolado — ReportingService`
+
+## Verificações úteis
+
+### Antes do cleanup
+
+```bash
+aws sqs list-queues --region us-east-1
 aws s3 ls
-
-# Listar ECR
 aws ecr describe-repositories --region us-east-1
+kubectl get all -n homolog | grep reporting
 ```
 
-### **Após limpeza**
+### Depois do cleanup
 
 ```bash
-# Confirmar que tudo foi removido
-aws sqs list-queues --region us-east-1  # Deve retornar vazio ou apenas filas de outros projetos
-aws s3 ls | grep "processador-diagramas"  # Deve estar vazio
-aws ecr describe-repositories --region us-east-1 --query 'repositories[?contains(repositoryName, `processador`)]'  # Vazio
-```
-
-### **Após setup**
-
-```bash
-# Confirmar recursos recriados
 aws sqs list-queues --region us-east-1
-aws s3 ls | grep "processador-diagramas"
-aws ecr describe-repositories --region us-east-1
+aws s3 ls | grep processador-diagramas
+aws ecr describe-repositories --region us-east-1 --query 'repositories[?contains(repositoryName, `processador`)]'
+kubectl get all -n homolog | grep reporting
 ```
 
----
+## Riscos e limites
 
-## ⚠️ Cuidados
+- O cluster EKS compartilhado continua existindo; este repositório remove o deploy, não o cluster
+- A RDS compartilhada continua existindo; este repositório preserva a instância por segurança
+- Para zerar quase todo o custo da infra compartilhada, a exclusão do cluster deve acontecer no repositório de infraestrutura
+- As credenciais do AWS Academy expiram; o processo de retomada depende de renovar os secrets AWS diariamente
 
-| Ação | Risco | Mitigação |
-|---|---|---|
-| `aws-cleanup.sh --confirm` sem verificar | Deletar buckets com dados importantes | Sempre rodar **dry-run** primeiro |
-| Deixar recursos overnight | Consumir créditos Academy | Rodar cleanup ao final do dia |
-| Esquecer de recriar | Testes falharem no dia seguinte | Setup automático atualiza contrato |
-| Usar conta errada | Deletar recursos de outro projeto | Confirmar `AWS_ACCOUNT_ID` antes |
+## FAQ
 
----
+**A RDS é apagada no fim do dia?**
 
-## 📊 Estimativa de custos (AWS Academy)
+Não por padrão. O banco do ReportingService fica dentro de uma instância compartilhada.
 
-- **30 dias de SQS**: ~$0.40
-- **30 dias de S3** (100 GB): ~$2.30
-- **30 dias de ECR privado**: ~$0 (primeiro 1 repo gratuito)
-- **30 dias de EKS**: ~$30 (sem cleanup)
+**O que fica salvo para amanhã?**
 
-**Com cleanup diário:** ~$0/mês ✅
+O comando com `--capture-state` grava um snapshot em `artifacts/end-of-day/`.
 
----
+**O workflow E2E isolado continua disponível amanhã?**
 
-## 🤖 Automação futura
-
-Se quiser automação total (sem intervenção manual):
-
-```bash
-#!/bin/bash
-# cron job diariamente às 17h (cleanup) e 9h (setup)
-
-# ~/.crontab
-0 17 * * * cd /path/to/repo && ./scripts/aws-cleanup.sh --confirm
-0 9 * * * cd /path/to/repo && AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) ./scripts/aws-setup-resources.sh
-```
-
----
-
-## ❓ FAQ
-
-**P: Se deletar um bucket sem limpar objetos?**  
-R: O script de cleanup limpa objetos antes de deletar. Se falhar, execute manualmente:
-```bash
-aws s3 rm s3://bucket-name --recursive
-```
-
-**P: Se a fila SQS tiver mensagens?**  
-R: O script deleta mesmo com mensagens (comportamento padrão). Se quiser purgar:
-```bash
-aws sqs purge-queue --queue-url <url>
-```
-
-**P: RDS fica aqui?**  
-R: Sim, se tiver criado RDS em dias anteriores, o cleanup detecta e remove.
-
-**P: E os logs dos testes?**  
-R: Ficar salvos localmente em `artifacts/`. Não são deletados pelo AWS cleanup.
-
----
-
-**Resumo:** Cleanup no final do dia (5 min), setup no início (3 min). Zero custos adicionais! 🎉
+Sim. Basta recriar recursos base, redeployar e disparar `Homolog E2E Isolado — ReportingService`.
 
