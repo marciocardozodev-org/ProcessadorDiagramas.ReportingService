@@ -21,8 +21,16 @@ internal static class AnalysisReportComposer
     /// </summary>
     public static (string Components, string Risks, string Recommendations) Compose(
         ProcessingJobResult jobResult)
+        => Compose(jobResult.RawAiOutput);
+
+    /// <summary>
+    /// Tenta extrair as seções estruturadas do output bruto de IA.
+    /// Se o output for JSON com as chaves esperadas, usa-as diretamente.
+    /// Caso contrário, encapsula o conteúdo bruto em um formato padrão.
+    /// </summary>
+    public static (string Components, string Risks, string Recommendations) Compose(string? rawAiOutput)
     {
-        var raw = jobResult.RawAiOutput ?? string.Empty;
+        var raw = rawAiOutput ?? string.Empty;
 
         try
         {
@@ -56,9 +64,10 @@ internal static class AnalysisReportComposer
                     ? prop.GetString()
                     : prop.GetRawText();
         }
+
         return null;
     }
 
     private static string WrapRaw(string key, string raw)
-        => JsonSerializer.Serialize(new Dictionary<string, string> { [key] = raw });
+        => JsonSerializer.Serialize(new Dictionary<string, string> { [key] = raw }, JsonOptions);
 }

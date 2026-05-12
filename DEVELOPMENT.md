@@ -2,7 +2,7 @@
 
 ## Objetivo da etapa atual
 
-Validar a base do microserviço com domínio, aplicação e persistência em EF Core antes de introduzir integração real com o ProcessingService.
+Validar a base do microserviço com domínio, aplicação e persistência em EF Core, agora alinhada ao consumo assíncrono do ProcessingService via SQS e mantendo o fallback HTTP legado apenas para compatibilidade.
 
 ## Loop local
 
@@ -79,7 +79,7 @@ Este serviço usa banco PostgreSQL independente:
 
 ## Direção das próximas etapas
 
-- Endpoint `GET /internal/jobs/by-analysis-process/{id}` no ProcessingService (necessário para integração real)
 - Testes do `RegenerateAnalysisReportCommandHandler` e `ReportsController`
 - Retry policy no `ProcessingServiceClient` com Polly
 - Testes de repositório com EF InMemory
+- Evolução do contrato compartilhado do evento `AnalysisProcessingCompletedV2`
