@@ -17,6 +17,7 @@ Microserviço responsável por **compor e persistir relatórios técnicos estrut
 |--------|------|-----------|
 | `GET`  | `/internal/reports/{analysisProcessId}` | Retorna o relatório (gera sob demanda se ainda não existir) |
 | `POST` | `/internal/reports/{analysisProcessId}/generate` | Força regeneração do relatório (nova versão) |
+| `GET`  | `/reports/{requestId}` | Leitura interna para o API Gateway com metadados + URL pré-assinada (ou conteúdo bruto) |
 | `GET`  | `/health` | Health check |
 | `GET`  | `/ready` | Readiness check |
 | `GET`  | `/` | Informações do serviço |
@@ -143,6 +144,32 @@ kubectl apply -f deploy/k8s/deployment.yaml
 
 ## Contrato assíncrono
 
+### Fluxo de integração (Upload Orchestrator -> ReportingService)
+
+Fila consumida:
+
+- `upload-orchestrator-analysis-completed`
+
+Payload canônico esperado (JSON no body ou no campo `Message` de envelope SNS):
+
+```json
+{
+  "requestId": "req-123",
+  "correlationId": "corr-123",
+  "s3ArtifactBucket": "processador-diagramas-reporting-hml-artifacts-767398027345",
+  "s3ArtifactKey": "reports/req-123/report.json",
+  "status": "Completed"
+}
+```
+
+Regras do consumidor:
+
+- valida payload obrigatório (`requestId`, `correlationId`, `s3ArtifactBucket`, `s3ArtifactKey`, `status`)
+- resolve metadados do objeto no S3
+- persiste em tabela `reports`
+- usa Inbox (`processed_inbox_messages`) com dedupe por `correlationId`
+- executa `DeleteMessage` apenas após persistência consistente
+
 O evento canônico consumido pelo ReportingService é o `AnalysisProcessingCompletedV2`.
 
 Campos esperados no payload:
@@ -175,3 +202,20 @@ Exemplo:
 2. Se não existe → consulta ProcessingService → compõe relatório → persiste → retorna (`200`)
 3. Se processamento ainda não concluiu → persiste como `Pending` → retorna (`202`)
 4. `POST /internal/reports/{id}/generate` → força nova versão do relatório (incrementa `Version`)
+
+## Endpoint interno para o API Gateway
+
+Rota:
+
+- `GET /reports/{requestId}`
+
+Segurança:
+
+- policy `internal`
+- API key obrigatória em header configurável (padrão: `x-internal-api-key`)
+
+Comportamento:
+
+- retorna `404` quando `requestId` não existe na tabela `reports`
+- por padrão retorna URL pré-assinada curta para o artefato no S3
+- com `includeContent=true`, retorna conteúdo bruto do artefato

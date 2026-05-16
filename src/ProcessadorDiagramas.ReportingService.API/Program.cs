@@ -1,7 +1,10 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using ProcessadorDiagramas.ReportingService.API.Auth;
 using ProcessadorDiagramas.ReportingService.Application;
 using ProcessadorDiagramas.ReportingService.Infrastructure;
+using ProcessadorDiagramas.ReportingService.Infrastructure.Configuration;
 using ProcessadorDiagramas.ReportingService.Infrastructure.Data;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -17,6 +20,23 @@ if (!string.Equals(builder.Configuration["DatabaseProvider"], "InMemory", String
     hcBuilder.AddDbContextCheck<AppDbContext>("database");
 
 builder.Services.AddProblemDetails();
+builder.Services.Configure<InternalApiOptions>(builder.Configuration.GetSection("InternalApi"));
+builder.Services
+    .AddAuthentication(InternalApiKeyAuthenticationHandler.SchemeName)
+    .AddScheme<AuthenticationSchemeOptions, InternalApiKeyAuthenticationHandler>(
+        InternalApiKeyAuthenticationHandler.SchemeName,
+        _ =>
+        {
+        });
+
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("internal", policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.AddAuthenticationSchemes(InternalApiKeyAuthenticationHandler.SchemeName);
+    });
+});
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -39,6 +59,8 @@ var app = builder.Build();
 
 app.UseExceptionHandler();
 app.UseStatusCodePages();
+app.UseAuthentication();
+app.UseAuthorization();
 
 if (app.Environment.IsDevelopment())
 {

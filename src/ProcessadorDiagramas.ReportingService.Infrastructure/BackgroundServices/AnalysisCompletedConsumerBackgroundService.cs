@@ -54,7 +54,9 @@ public sealed class AnalysisCompletedConsumerBackgroundService : BackgroundServi
         var processor = scope.ServiceProvider.GetRequiredService<AnalysisCompletedMessageProcessor>();
         var queueOptions = scope.ServiceProvider.GetRequiredService<IOptions<QueuesOptions>>().Value;
 
-        var queueUrl = await queueResolver.ResolveQueueUrlAsync(queueOptions.AnalysisCompletedQueueName, cancellationToken);
+        var queueUrl = !string.IsNullOrWhiteSpace(queueOptions.AnalysisCompletedQueueUrl)
+            ? queueOptions.AnalysisCompletedQueueUrl
+            : await queueResolver.ResolveQueueUrlAsync(queueOptions.AnalysisCompletedQueueName, cancellationToken);
 
         var response = await sqsClient.ReceiveMessageAsync(
             new ReceiveMessageRequest

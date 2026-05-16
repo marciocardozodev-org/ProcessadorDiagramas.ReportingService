@@ -2,6 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: processador-diagramas-reportingservice-migrations
+  namespace: homolog
   labels:
     app: processador-diagramas-reportingservice
 spec:
@@ -15,7 +16,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: migrations
-          image: marciocardozodev/processador-diagramas-reportingservice:${IMAGE_TAG}
+          image: 767398027345.dkr.ecr.us-east-1.amazonaws.com/processador-diagramas-reportingservice:${IMAGE_TAG}
           imagePullPolicy: ${IMAGE_PULL_POLICY}
           envFrom:
             - secretRef:

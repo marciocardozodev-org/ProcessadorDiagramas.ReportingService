@@ -1,5 +1,6 @@
 using Amazon;
 using Amazon.Runtime;
+using Amazon.S3;
 using Amazon.SQS;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -54,11 +55,17 @@ public static class DependencyInjection
         services.Configure<AwsOptions>(configuration.GetSection("Aws"));
         services.Configure<QueuesOptions>(configuration.GetSection("Queues"));
         services.Configure<MessagingOptions>(configuration.GetSection("Messaging"));
+        services.Configure<InternalApiOptions>(configuration.GetSection("InternalApi"));
 
         services.AddSingleton<IAmazonSQS>(serviceProvider =>
         {
             var awsOptions = serviceProvider.GetRequiredService<IOptions<AwsOptions>>().Value;
             return CreateSqsClient(awsOptions);
+        });
+        services.AddSingleton<IAmazonS3>(serviceProvider =>
+        {
+            var awsOptions = serviceProvider.GetRequiredService<IOptions<AwsOptions>>().Value;
+            return CreateS3Client(awsOptions);
         });
         services.AddSingleton<SqsQueueUrlResolver>();
         services.AddScoped<AnalysisCompletedMessageProcessor>();
@@ -92,5 +99,30 @@ public static class DependencyInjection
             : new SessionAWSCredentials(options.AccessKey, options.SecretKey, options.SessionToken);
 
         return new AmazonSQSClient(credentials, config);
+    }
+
+    private static IAmazonS3 CreateS3Client(AwsOptions options)
+    {
+        var config = new AmazonS3Config();
+
+        if (!string.IsNullOrWhiteSpace(options.Region))
+            config.RegionEndpoint = RegionEndpoint.GetBySystemName(options.Region);
+
+        if (!string.IsNullOrWhiteSpace(options.ServiceUrl))
+        {
+            config.ServiceURL = options.ServiceUrl;
+            if (!string.IsNullOrWhiteSpace(options.Region))
+                config.AuthenticationRegion = options.Region;
+            config.ForcePathStyle = true;
+        }
+
+        if (string.IsNullOrWhiteSpace(options.AccessKey) || string.IsNullOrWhiteSpace(options.SecretKey))
+            return new AmazonS3Client(config);
+
+        AWSCredentials credentials = string.IsNullOrWhiteSpace(options.SessionToken)
+            ? new BasicAWSCredentials(options.AccessKey, options.SecretKey)
+            : new SessionAWSCredentials(options.AccessKey, options.SecretKey, options.SessionToken);
+
+        return new AmazonS3Client(credentials, config);
     }
 }
